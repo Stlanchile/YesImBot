@@ -22,7 +22,7 @@ export abstract class BaseAdapter {
   protected readonly apiKey: string;
   protected readonly model: string;
   protected readonly otherParams: Record<string, any>;
-  readonly ability: ("原生工具调用" | "识图功能" | "结构化输出")[];
+  readonly ability: ("原生工具调用" | "识图功能" | "结构化输出" | "流式输出")[];
 
   protected history: Message[] = [];
 
@@ -39,27 +39,33 @@ export abstract class BaseAdapter {
     this.otherParams = {};
     if (this.parameters?.OtherParameters) {
       Object.entries(this.parameters?.OtherParameters).forEach(([key, value]) => {
-          key = key.trim();
+        key = key.trim();
+        if (typeof value === 'string') {
           value = value.trim();
-          // 尝试解析 JSON 字符串
-          try {
-            value = JSON.parse(value);
-          } catch (e) {
-            // 如果解析失败，保持原值
-          }
-          // 转换 value 为适当的类型
-          if (value === "true") {
-            this.otherParams[key] = true;
-          } else if (value === "false") {
-            this.otherParams[key] = false;
-            // @ts-ignore
-          } else if (!isNaN(value)) {
-            this.otherParams[key] = Number(value);
-          } else {
-            this.otherParams[key] = value;
-          }
         }
-      );
+        // 尝试解析 JSON 字符串
+        try {
+          // 仅当值为字符串时才进行解析
+          if (typeof value === 'string') {
+            value = JSON.parse(value);
+          }
+        } catch (e) {
+          // 如果解析失败，保持原值
+        }
+        // 转换 value 为适当的类型
+        if (typeof value === 'boolean') {
+          this.otherParams[key] = value;
+        } else if (value === 'true') {
+          this.otherParams[key] = true;
+        } else if (value === 'false') {
+          this.otherParams[key] = false;
+          // @ts-ignore
+        } else if (!isNaN(value)) {
+          this.otherParams[key] = Number(value);
+        } else {
+          this.otherParams[key] = value;
+        }
+      });
     }
 
     logger.info(`Adapter: ${APIType} registered`);
