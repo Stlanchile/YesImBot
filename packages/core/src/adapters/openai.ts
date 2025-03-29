@@ -2,7 +2,7 @@ import { Config } from "../config";
 import { sendRequest, sendStreamRequest } from "../utils/http";
 import { BaseAdapter, Response } from "./base";
 import { LLM } from "./config";
-import { Message } from "./creators/component";
+import { AssistantMessage, Message } from "./creators/component";
 import { ToolSchema } from "./creators/schema";
 
 export class OpenAIAdapter extends BaseAdapter {
@@ -12,14 +12,20 @@ export class OpenAIAdapter extends BaseAdapter {
   }
 
   async chat(messages: Message[], toolsSchema?: ToolSchema[], debug = false): Promise<Response> {
+    if (this.ability.includes("对话前缀续写") && this.startWith) {
+      messages.push({ "role": "assistant", "content": this.startWith, "prefix": true } as AssistantMessage)
+    }
     const requestBody: any = {
       model: this.model,
+      reasoning_effort: this.ability.includes("深度思考") ? this.reasoningEffort : undefined,
       messages,
       ...(toolsSchema ? { tools: toolsSchema } : {}),
       temperature: this.parameters?.Temperature,
       max_tokens: this.parameters?.MaxTokens,
+      top_p: this.parameters?.TopP,
       frequency_penalty: this.parameters?.FrequencyPenalty,
       presence_penalty: this.parameters?.PresencePenalty,
+      stop: this.parameters?.Stop,
       response_format: this.ability.includes("结构化输出")
         ? { type: "json_object" }
         : undefined,
@@ -29,12 +35,22 @@ export class OpenAIAdapter extends BaseAdapter {
 
     if (this.ability.includes("流式输出")) {
       requestBody["stream"] = true;
-      let fullContent = '';
+      let fullContent = "";
+      let currentLineBuffer = "";
       await sendStreamRequest(this.url, this.apiKey, requestBody, this.adapterConfig.Timeout, (chunk) => {
         let data = JSON.parse(chunk);
         if (data.choices[0].finish_reason !== "stop") {
-          fullContent += data.choices[0].delta.reasoning_content || data.choices[0].delta.content || "";
-          process.stdout.write(`\x1B[K\r${fullContent}`); // \x1B[K 清除整行，\r 回到行首
+          let delta = data.choices[0].delta.reasoning_content || data.choices[0].delta.content || "";
+          fullContent += delta;
+          currentLineBuffer += delta;
+          if (currentLineBuffer.includes("\n")) {
+            // 清除当前行并将光标移动到行首
+            process.stdout.write('\x1B[K\r');
+            // 输出新的文本
+            process.stdout.write(currentLineBuffer);
+            // 重置当前行缓冲区
+            currentLineBuffer = "";
+          }
         } else {
           response = data;
           response.choices[0].message = {
@@ -49,19 +65,28 @@ export class OpenAIAdapter extends BaseAdapter {
     }
 
     try {
-      return {
-        model: response.model,
-        created: response.created,
-        message: {
-          role: response.choices[0].message.role,
-          content: response.choices[0].message.content,
-          tool_calls: response.choices[0].message.tool_calls,
-        },
-        usage: response.usage,
-      };
+      return this.formatResponse(response);
     } catch (error) {
-      console.error("Error parsing response:", error);
-      console.error("Response:", response);
+      console.error('[OpenAIAdapter] 响应解析失败:', error);
+      throw new Error('Failed to process OpenAI response');
     }
+  }
+
+  private formatResponse(response: any): Response {
+    const choice = response.choices?.[0];
+    if (!choice?.message) {
+      throw new Error('Invalid response format from OpenAI');
+    }
+
+    return {
+      model: response.model,
+      created: response.created,
+      message: {
+        role: choice.message.role,
+        content: choice.message.content,
+        tool_calls: choice.message.tool_calls,
+      },
+      usage: response.usage,
+    };
   }
 }

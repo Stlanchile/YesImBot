@@ -1,21 +1,23 @@
-import { Context, Next, Random, Session } from "koishi";
-import { h, sleep } from "koishi";
+import { Context, h, Next, Random, Session, sleep } from "koishi";
 
-import { Config } from "./config";
-import { containsFilter, getBotName, isChannelAllowed, getFileUnique, getFormatDateTime, toolsToString } from "./utils/toolkit";
-import { ensurePromptFileExists, genSysPrompt } from "./utils/prompt";
-import { MarkType, SendQueue } from "./services/sendQueue";
+import path from "path";
 import { getOutputSchema } from "./adapters/creators/schema";
-import { initDatabase } from "./database";
-import { processContent, processText } from "./utils/content";
-import { foldText, isEmpty, isNotEmpty } from "./utils/string";
-import { createMessage, getChannelType } from "./models/ChatMessage";
-import { convertUrltoBase64 } from "./utils/imageUtils";
 import { Bot } from "./bot";
-import { apply as applyMemoryCommands } from "./commands/memory";
-import { apply as applySendQueueCommands } from "./commands/sendQueue";
 import { apply as applyExtensionCommands } from "./commands/extension";
+import { apply as applySendQueueCommands } from "./commands/sendQueue";
+import { Config } from "./config";
+import { initDatabase } from "./database";
+import { EmojiManager } from "./managers/emojiManager";
+import { createMessage, getChannelType } from "./models/ChatMessage";
 import { FailedResponse, SkipResponse, SuccessResponse } from "./models/LLMResponse";
+import { ImageViewer } from "./services/imageViewer";
+import { MarkType, SendQueue } from "./services/sendQueue";
+import { ResponseVerifier } from "./utils/verifier";
+import { processContent, processText } from "./utils/content";
+import { convertUrltoBase64, ImageCache } from "./utils/imageUtils";
+import { ensurePromptFileExists, genSysPrompt } from "./utils/prompt";
+import { foldText, isEmpty } from "./utils/string";
+import { containsFilter, getBotName, getFileUnique, getFormatDateTime, isChannelAllowed, toolsToString } from "./utils/toolkit";
 
 export const name = "yesimbot";
 
@@ -39,15 +41,22 @@ export const inject = {
   ],
 }
 
-declare global {
-  var baseDir: string;
-}
-
 export function apply(ctx: Context, config: Config) {
-  globalThis.baseDir = ctx.baseDir;
-
   let shouldReTrigger = false;
-  let bot = new Bot(ctx, config);
+
+  const emojiManager = config.Embedding.Enabled ? new EmojiManager(config.Embedding, ctx.baseDir) : null;
+  const verifier = config.Verifier.Enabled ? new ResponseVerifier(ctx, config) : null;
+  const imageViewer = new ImageViewer(ctx, config);
+
+  ImageCache.instance = new ImageCache(path.join(ctx.baseDir, "data/yesimbot/cache/downloadImage"));;
+
+  const bot = new Bot({
+    ctx,
+    config,
+    emojiManager,
+    verifier,
+    imageViewer
+  });
 
   initDatabase(ctx);
   const sendQueue = new SendQueue(ctx, config);
@@ -57,13 +66,14 @@ export function apply(ctx: Context, config: Config) {
   ctx.on("ready", async () => {
     process.setMaxListeners(20);
 
-    if (!config.Settings.UpdatePromptOnLoad) return;
-    ctx.logger.info("正在尝试更新 Prompt 文件...");
-    await ensurePromptFileExists(
-      config.Bot.PromptFileUrl[config.Bot.PromptFileSelected],
-      true,
-      config.Debug.DebugAsInfo
-    );
+    if (config.Settings.UpdatePromptOnLoad) {
+      ctx.logger.info("正在尝试更新 Prompt 文件...");
+      await ensurePromptFileExists(
+        config.Bot.PromptFileUrl[config.Bot.PromptFileSelected],
+        true,
+        config.Debug.DebugAsInfo
+      );
+    }
   });
 
   ctx.on("command/before-execute", async ({ session, command }) => {
@@ -87,7 +97,7 @@ export function apply(ctx: Context, config: Config) {
 
   ctx.on("message-created", async (session) => {
     // 等待1毫秒
-    await sleep(1)
+    await sleep(1);
     const channelId = session.channelId;
 
     if (!isChannelAllowed(config.MemorySlot.SlotContains, channelId)) {
@@ -206,7 +216,7 @@ export function apply(ctx: Context, config: Config) {
         }, config.MemorySlot.MinTriggerTime)
       );
     }
-    if(await minTriggerTimeHandlers.get(channelId)(session)) return next();
+    if (await minTriggerTimeHandlers.get(channelId)(session)) return next();
   });
 
   /**
@@ -230,22 +240,22 @@ export function apply(ctx: Context, config: Config) {
 
     try {
       // 处理内容
-      const chatHistory = await processContent(config, session, await sendQueue.getMixedQueue(channelId), bot.imageViewer);
+      const chatHistory = await processContent(config, session, await sendQueue.getMixedQueue(channelId), bot.imageViewer, bot.getAdapter().adapter, bot.finalFormat);
 
-      // 生成响应
+      // 生成messages数组
       if (!chatHistory || (Array.isArray(chatHistory) && chatHistory.length === 0)) {
         if (config.Debug.DebugAsInfo) ctx.logger.info(`未获取到${channelId}的聊天记录`);
         return false;
       }
 
       if (config.Debug.DebugAsInfo) {
-        ctx.logger.info("ChatHistory:\n" + chatHistory.map(item => {
-            const content = typeof item.content === 'object' ?
-                JSON.stringify(item.content, null, 2) :
-                item.content;
-            return `[${item.role}] ${content}`;
-        }).join("\n"));
-    }
+        ctx.logger.info("ChatHistory:\n" + foldText(chatHistory.map(item => {
+          const content = typeof item.content === 'object' ?
+            JSON.stringify(item.content, null, 2) :
+            item.content;
+          return `${content}`;
+        }).join("\n"), 1000));
+      }
       bot.setSession(session);
       bot.setChatHistory(chatHistory);
 
@@ -260,7 +270,7 @@ export function apply(ctx: Context, config: Config) {
             curGroupId: channelId,
             BotName: botName,
             BotSelfId: session.bot.selfId,
-            outputSchema: getOutputSchema(config.Settings.LLMResponseFormat),
+            outputSchema: getOutputSchema(bot.finalFormat),
             functionPrompt: "{{functionPrompt}}",
             // 记忆模块还未完成，等完成后取消注释
             // coreMemory: await bot.getCoreMemory(session.selfId),
@@ -269,6 +279,7 @@ export function apply(ctx: Context, config: Config) {
         )
       );
 
+      // 生成响应
       if (config.Debug.DebugAsInfo) ctx.logger.info(`Request sent, awaiting for response...`);
 
       const chatResponse = await bot.generateResponse([], config.Debug.DebugAsInfo);
@@ -303,7 +314,7 @@ ${toolsToString(functions)}
 ---
 消耗：输入 ${usage?.prompt_tokens}，输出 ${usage?.completion_tokens}`
         ctx.logger.info(`${botName}想要跳过此次回复`);
-        await sendQueue.addRawMessage(session, raw);
+      await sendQueue.addRawMessage(session, raw);
 
         //如果 AI 使用了指令
         if (functions.length > 0) {
@@ -440,7 +451,7 @@ export async function redirectLogicMessage(
   message: string,
 ) {
   if (!config.Settings.LogicRedirect.Enabled) return;
-  const messageIds = await session.bot.sendMessage(config.Settings.LogicRedirect.Target, message);
+  const messageIds = await session.bot.sendMessage(config.Settings.LogicRedirect.Target, h.escape(message));
   for (const messageId of messageIds) {
     sendQueue.setMark(messageId, MarkType.LogicRedirect);
   }
@@ -452,3 +463,4 @@ export * from "./embeddings";
 export * from "./managers/cacheManager";
 export * from "./models/ChatMessage";
 export * from "./utils/factory";
+

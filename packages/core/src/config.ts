@@ -96,7 +96,11 @@ export interface Config {
     UpdatePromptOnLoad: boolean;
     AllowErrorFormat: boolean;
     MultiTurn: boolean;
-    MultiTurnFormat: "JSON" | "CUSTOM";
+    AddRoleTagBeforeContent: boolean;
+    AssistantFormat: "RAW" | "CONTENT";
+    RemoveTheseFromRAW: Array<"status" | "replyTo" | "nextReplyIn" | "logic" | "reply" | "check" | "finalReply" | "functions">;
+    SendAssistantMessageAs: "USER" | "ASSISTANT";
+    MergeConsecutiveMessages: boolean;
     LLMResponseFormat: "JSON" | "XML";
   };
   Debug: {
@@ -107,11 +111,12 @@ export interface Config {
 }
 
 export const Config: Schema<Config> = Schema.object({
+  // TODO: 给每个记忆槽位单独的设置
   MemorySlot: Schema.object({
     SlotContains: Schema.array(Schema.array(Schema.string()).role("table"))
       .required()
       .role("table")
-      .description("记忆槽位。填入一个或多个会话ID，每行一个。群聊的会话ID是群号，私聊的会话ID是带有\"private:\" + 用户账号。用\"all\"指定所有群聊，用\"private:all\"指定所有私聊。同一个槽位的聊天将共用同一份记忆。如果多个槽位都包含同一会话ID，第一个包含该会话ID的槽位将被应用"),
+      .description("记忆槽位。填入一个或多个会话ID，每行一个。群聊的会话ID是群号，私聊的会话ID是\"private:\" + 用户账号。用\"all\"指定所有群聊，用\"private:all\"指定所有私聊。同一个槽位的聊天将共用同一份记忆。如果多个槽位都包含同一会话ID，第一个包含该会话ID的槽位将被应用"),
     SlotSize: Schema.number()
       .default(20)
       .min(1)
@@ -435,7 +440,7 @@ export const Config: Schema<Config> = Schema.object({
 
   Settings: Schema.object({
     SingleMessageStrctureTemplate: Schema.string()
-      .default("[{{messageId}}][{{date}} {{channelInfo}}] {{senderName}}<{{senderId}}> {{hasQuote,回复[{{quoteMessageId}}]: ,说: }}{{userContent}}")
+      .default("[{{messageId}}][{{date}} {{channelInfo}}] {{senderName}}<{{senderId}}>: {{userContent}}")
       .description("单条消息的结构模板"),
     SendResolveOK: Schema.boolean()
       .default(true)
@@ -472,16 +477,43 @@ export const Config: Schema<Config> = Schema.object({
       .default(false)
       .description("兼容几种较为常见的大模型错误输出格式"),
     MultiTurn: Schema.boolean()
+     .default(true)
+     .description("将历史消息以多轮对话格式传递给LLM"),
+    AddRoleTagBeforeContent: Schema.boolean()
       .default(false)
-      .description("将历史消息以多轮对话格式传递给LLM，这会使得LLM更好地理解哪些消息是自己曾发出的"),
-    MultiTurnFormat: Schema.union([
-      Schema.const("JSON").description("JSON 格式"),
-      Schema.const("CUSTOM").description("自定义格式"),
-    ]).default("CUSTOM").description("开启多轮对话时，传递给LLM的消息格式。"),
+      .description("在消息内容前添加发送者的角色标签，格式为[role]"),
+    AssistantFormat: Schema.union([
+      Schema.const("RAW").description("原始消息（完整JSON或者XML）"),
+      Schema.const("CONTENT").description("消息内容（经单条消息模板处理的finalReply）"),
+    ])
+      .default("RAW")
+      .description("在构建请求中的messages数组时，Bot历史消息的呈现格式"),
+    RemoveTheseFromRAW: Schema.array(
+      Schema.union([
+        Schema.const("status").description("status: 状态信息，Athena能够处理的值有三种，为`success`、`skip`、`interaction`，其余值会被置为`fail`"),
+        Schema.const("replyTo").description("replyTo: 消息发送的目的地，群聊的话就是群号，私聊的话就是带有`private:`的用户账号"),
+        Schema.const("nextReplyIn").description("nextReplyIn: Bot 还需要收到这么多条消息才会看一眼聊天内容"),
+        Schema.const("logic").description("logic: Bot 的思考逻辑，在上下文中，它可能引起复读问题，推荐勾选"),
+        Schema.const("reply").description("reply: Bot 的初版回复，可能会引起复读问题，推荐勾选"),
+        Schema.const("check").description("check: Bot 的对消息生成条例的检查结果，可能会引起复读问题，推荐勾选"),
+        Schema.const("finalReply").description("finalReply: Bot 的最终回复，如果勾选了，Bot就不知道自己之前发的消息是什么啦，所以不要勾选哦"),
+        Schema.const("functions").description("functions: Bot 的功能调用，勾不勾问题都不大"),
+      ])
+    )
+      .role("checkbox")
+      .default(["nextReplyIn", "logic", "reply", "check"])
+      .description("从 Bot 的原始消息中移除这些字段的值"),
+    SendAssistantMessageAs: Schema.union(["USER", "ASSISTANT"])
+      .default("ASSISTANT")
+      .description("在构建请求中的messages数组时，把 Bot 的历史消息或工具调用消息按照此角色呈现"),
+    MergeConsecutiveMessages: Schema.boolean()
+      .default(false)
+      .description
+      ("合并连续的USER或ASSISTANT消息。如果最后一条消息是ASSISTANT消息，在其后添加一条空的USER消息。某些模型可能需要开启此设置"),
     LLMResponseFormat: Schema.union([
       Schema.const("JSON").description("JSON 格式"),
       Schema.const("XML").description("XML 格式"),
-    ]).default("XML").description("LLM 返回的消息格式。"),
+    ]).default("XML").description("LLM 返回的消息格式。如勾选了“结构化输出”，消息格式将为“JSON”，此处设置将被忽略"),
   }).description("插件设置"),
 
   Debug: Schema.object({

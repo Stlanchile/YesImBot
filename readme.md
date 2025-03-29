@@ -159,7 +159,8 @@ ${config.Bot.CuteMode} -> 开启|关闭
 
 ${curDate} -> 当前时间 # 2024年12月3日星期二17:34:00
 ${curGroupId} -> 当前所在群的群号
-${outputSchema} -> LLM期望的输出格式模板
+${outputSchema} -> LLM 期望的输出格式模板
+${functionPrompt} -> 可供 LLM 调用的工具的描述
 ${coreMemory} -> 要附加给LLM的记忆
 ```
 - 当前，消息队列呈现给 LLM 的格式是这样的：
@@ -172,13 +173,30 @@ ${coreMemory} -> 要附加给LLM的记忆
       "status": "success",    // "success" 或 "skip" (跳过回复) 或 "function" (运行工具)
       "replyTo": "123456789", // 要把finReply发送到的会话id
       "nextReplyIn": 2,       // 下次回复的冷却条数，让LLM参与控制发言频率
-      "quote": "", // 要引用回复的消息ID
       "logic": "", // LLM思考过程
       "reply": "", // 初版回复
       "check": "", // 检查初版回复是否符合 "消息生成条例" 过程中的检查逻辑。
       "finReply": "", // 最终版回复
-      "functions": [] // 要运行的指令列表
+      "functions": [{"name": "FUNCTION_NAME", "params": {"PARAM_NAME": "value1", "PARAM_NAME": "value2"}}, {"name": "function2", "params": {"param1": "value1"}}] // 要运行的指令列表
 }
+```
+或者，如果选择使用XML，格式如下：
+```xml
+<status>success</status>
+<replyTo>123456789</replyTo>
+<nextReplyIn>2</nextReplyIn>
+<logic></logic>
+<reply></reply>
+<check></check>
+<finReply></finReply>
+<functions>
+  <function>
+    <name>FUNCTION_NAME</name>
+    <params>
+      <PARAM_NAME>value1</PARAM_NAME>
+    </params>
+  </function>
+</functions>
 ```
 
 > [!NOTE]
@@ -211,7 +229,7 @@ ${coreMemory} -> 要附加给LLM的记忆
 - [x] 表情发送
 - [x] 图片多模态与基于图像识别的伪多模态
 - [ ] 转发消息拾取
-- [ ] TTS/STT 文字转语音
+- [ ] TTS/STT
 - [ ] RAG 记忆库
 - [ ] 读取文件
 - [x] 工具调用

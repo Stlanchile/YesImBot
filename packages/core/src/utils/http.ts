@@ -1,6 +1,7 @@
-import axios, { AxiosError } from "axios";
+import axios, { AxiosError, AxiosResponse } from "axios";
 
 import { isNotEmpty } from "./string";
+import logger from "./logger";
 
 export enum HttpErrorCode {
   NetworkError = 'NETWORK_ERROR',
@@ -39,6 +40,12 @@ export async function sendRequest<T = any>(
   debug: boolean = false
 ): Promise<T> {
   try {
+    if (debug) {
+      logger.info(`
+        Request Body:
+        ${JSON.stringify(requestBody, null, 2)}
+      `);
+    }
     const response = await axios.post(url, requestBody, {
       headers: {
         'Authorization': isNotEmpty(APIKey) ? `Bearer ${APIKey}` : undefined,
@@ -57,6 +64,13 @@ export async function sendRequest<T = any>(
       );
     }
 
+    if (debug) {
+      logger.info(`
+        Response:
+        ${JSON.stringify(response.data, null, 2)}
+      `);
+    }
+
     return response.data;
   } catch (error) {
     handleError(error, url);
@@ -65,62 +79,78 @@ export async function sendRequest<T = any>(
 
 export async function sendStreamRequest<T = any>(
   url: string,
-  APIKey: string,
+  apiKey: string,
   requestBody: any,
   timeout: number = 114514,
   onData: (chunk: string) => void,
   debug: boolean = false
 ): Promise<T> {
   try {
+    // if (debug) {
+    //   logger.info(`[Stream Request] URL: ${url}\nBody: ${JSON.stringify(requestBody, null, 2)}`);
+    // }
     const response = await axios.post(url, requestBody, {
       headers: {
-        'Authorization': isNotEmpty(APIKey) ? `Bearer ${APIKey}` : undefined,
+        'Authorization': isNotEmpty(apiKey) ? `Bearer ${apiKey}` : undefined,
         'Content-Type': "application/json",
-        'Accept': 'text/event-stream', // 添加SSE支持
+        'Accept': 'text/event-stream',
       },
-      responseType: 'stream', // 启用流式传输
+      responseType: 'stream',
       timeout,
     });
-
-    return new Promise((resolve, reject) => {
-      let buffer = '';
-
-      response.data.on('data', (chunk: Buffer) => {
-        try {
-          const rawData = chunk.toString();
-          buffer += rawData;
-
-          // 处理SSE格式数据
-          const lines = buffer.split('\n');
-          for (const line of lines) {
-            if (line.startsWith('data: ')) {
-              const data = line.replace(/^data: /, '').trim();
-              if (data !== '[DONE]') {
-                onData(data); // 实时推送数据块
-              }
-            }
-          }
-          buffer = lines[lines.length - 1];
-        } catch (e) {
-          reject(new HttpError(HttpErrorCode.ServerError, '流数据处理失败'));
-        }
-      });
-
-      response.data.on('end', () => {
-        try {
-          resolve(buffer as T);
-        } catch (e) {
-          reject(new HttpError(HttpErrorCode.ServerError, '最终响应解析失败'));
-        }
-      });
-
-      response.data.on('error', (err: Error) => {
-        reject(new HttpError(HttpErrorCode.NetworkError, `流传输错误: ${err.message}`));
-      });
-    });
+    return createStreamProcessor(response, onData);
   } catch (error) {
     handleError(error, url);
   }
+}
+
+function createStreamProcessor<T>(response: AxiosResponse, onData: (chunk: string) => void): Promise<T> {
+  return new Promise((resolve, reject) => {
+    let buffer = '';
+    const stream = response.data;
+
+    const handleData = (chunk: Buffer) => {
+      try {
+        buffer += chunk.toString();
+        const { remaining, lines } = processSSE(buffer);
+        buffer = remaining;
+
+        lines.forEach(line => {
+          if (line.startsWith('data: ')) {
+            const data = line.slice(6).trim();
+            if (data !== '[DONE]') onData(data);
+          }
+        });
+      } catch (e) {
+        reject(new HttpError(HttpErrorCode.ServerError, '流数据处理失败', undefined, { chunk }));
+      }
+    };
+
+    const handleEnd = () => {
+      try {
+        resolve(buffer as T);
+      } catch (e) {
+        reject(new HttpError(HttpErrorCode.ServerError, '最终响应解析失败', undefined, { buffer }));
+      }
+    };
+
+    const handleError = (err: Error) => {
+      reject(new HttpError(HttpErrorCode.NetworkError, `流传输错误: ${err.message}`, undefined, { error: err }));
+    };
+
+    stream
+      .on('data', handleData)
+      .on('end', handleEnd)
+      .on('error', handleError);
+  });
+}
+
+function processSSE(buffer: string): { remaining: string; lines: string[] } {
+  const lines = buffer.split('\n');
+  return {
+    remaining: lines.pop() || '',
+    lines: lines.filter(line => line.trim().length > 0)
+  };
 }
 
 function handleError(error: any, url: string) {
