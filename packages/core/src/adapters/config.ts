@@ -1,6 +1,7 @@
 import { Schema } from "koishi";
 
 export interface LLM {
+  Id: string;
   Enabled?: boolean;
   APIType: "OpenAI" | "Cloudflare" | "Ollama" | "Custom URL" | "Gemini";
   BaseURL: string;
@@ -37,6 +38,7 @@ export const API: Schema<LLM> = Schema.intersect([
     APIType: Schema.union(["OpenAI", "Cloudflare", "Ollama", "Custom URL", "Gemini"])
       .default("OpenAI")
       .description("API 类型"),
+    Id: Schema.string().required().description("此API配置的唯一标识符，例如 'gemini-pro' 或 'fast-router'。"),
     // BaseURL: Schema.string()
     //   .default("https://api.openai.com")
     //   .description("API 基础 URL, 设置为\"Custom URL\"需要填写完整的 URL"),

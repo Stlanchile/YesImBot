@@ -1,3 +1,4 @@
+import { Context } from "koishi";
 import { CacheManager } from "../managers/cacheManager";
 import { sendRequest } from "../utils/http";
 import { EmbeddingBase } from "./base";
@@ -9,7 +10,7 @@ export class OllamaEmbedding extends EmbeddingBase {
   private apiKey: string;
   private baseUrl: string;
 
-  constructor(config: EnabledEmbeddingConfig, manager?: CacheManager<number[]>) {
+  constructor(ctx: Context, config: EnabledEmbeddingConfig, manager?: CacheManager<number[]>) {
     super(config, manager);
 
     this.model = this.config.EmbeddingModel || "nomic-embed-text";

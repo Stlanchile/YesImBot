@@ -28,6 +28,14 @@ export class AdapterSwitcher {
     }
   }
 
+  getAdapterById(id: string): { current: number, adapter: BaseAdapter } {
+    const index = this.adapters.findIndex(a => a.adapterConfig.Id === id);
+    if (index !== -1) {
+        return { current: index, adapter: this.adapters[index] };
+    }
+    return { current: -1, adapter: null };
+  }
+
   updateConfig(
     adapterConfig: Config["API"]["APIList"],
     parameters: Config["Parameters"]

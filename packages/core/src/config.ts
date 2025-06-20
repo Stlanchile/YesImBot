@@ -3,6 +3,28 @@ import { EmbeddingConfig } from "./embeddings/config";
 import { Config as AdapterConfig } from "./adapters/config";
 
 export interface Config {
+  IntelligentRouter: {
+    Enabled: boolean;
+    RouterModel: {
+      AdapterId: string;
+      RouterPrompt: string;
+    };
+    StandardModel: {
+      AdapterId: string;
+    };
+    EnhancedModel: {
+      AdapterId: string;
+      EnhancedPrompt: string;
+    };
+    LatencyOptimization: {
+      Enabled: boolean;
+      RouterTimeout: number;
+      Heuristics: {
+        ShortMessageThreshold: number;
+        CodeBlockTriggersEnhanced: boolean;
+      };
+    };
+  };
   MemorySlot: {
     SlotContains: string[][];
     SlotSize: number;
@@ -153,6 +175,37 @@ export const Config: Schema<Config> = Schema.object({
       .default(["你是", "You are", "吧", "呢"])
       .description("过滤的词汇（防止被调皮群友/机器人自己搞傻）可以使用正则表达式"),
   }).description("记忆槽位设置"),
+
+  IntelligentRouter: Schema.object({
+    Enabled: Schema.boolean().default(false).description("是否启用双模型智能路由。"),
+    RouterModel: Schema.object({
+        AdapterId: Schema.string().description("路由模型的适配器ID。必须是一个响应快速的轻量级模型。"),
+        RouterPrompt: Schema.string().role('textarea').default(
+`You are a request router. Your task is to classify the user's request into one of two categories: 'STANDARD' or 'ENHANCED'.
+- 'STANDARD' is for simple, everyday conversation, greetings, or short questions.
+- 'ENHANCED' is for requests that require deep thinking, creativity, code generation, complex analysis, or multi-step planning.
+
+Analyze the following user request and respond with ONLY ONE WORD: 'STANDARD' or 'ENHANCED'.
+
+User Request: {{lastUserMessage}}`
+        ).description("用于指导路由模型进行分类的系统提示词。必须包含 `{{lastUserMessage}}` 占位符。"),
+    }).description("用于决策的轻量级AI模型。"),
+    StandardModel: Schema.object({
+      AdapterId: Schema.string().description("标准模型的适配器ID。"),
+    }).description("用于处理日常对话的默认模型。"),
+    EnhancedModel: Schema.object({
+      AdapterId: Schema.string().description("增强模型的适配器ID。"),
+      EnhancedPrompt: Schema.string().role('textarea').description("专属增强提示词。"),
+    }).description("用于处理复杂任务的增强模型。"),
+    LatencyOptimization: Schema.object({
+        Enabled: Schema.boolean().default(true).description("是否启用延迟优化策略。"),
+        RouterTimeout: Schema.number().default(800).min(100).description("路由模型的API调用超时时间（毫秒）。超时后将自动使用标准模型。"),
+        Heuristics: Schema.object({
+            ShortMessageThreshold: Schema.number().default(5).min(0).description("当消息词数小于或等于此值时，立即判定为'STANDARD'，不调用路由模型。设为0禁用。"),
+            CodeBlockTriggersEnhanced: Schema.boolean().default(true).description("当消息包含代码块(```)时，立即判定为'ENHANCED'，不调用路由模型。"),
+        }).description("启发式规则，用于快速过滤简单请求，避免不必要的API调用。")
+    }).description("延迟优化策略")
+  }).description("双模型智能路由设置"),
 
   API: AdapterConfig,
 

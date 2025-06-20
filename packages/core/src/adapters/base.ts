@@ -31,7 +31,7 @@ export abstract class BaseAdapter {
   protected history: Message[] = [];
 
   constructor(
-    protected adapterConfig: LLM,
+    public adapterConfig: LLM,
     protected parameters?: Config["Parameters"]
   ) {
     const { APIKey, APIType, AIModel, Ability, ReasoningStart, ReasoningEnd, ReasoningEffort, StartWith } = adapterConfig;

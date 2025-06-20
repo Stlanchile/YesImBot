@@ -1,147 +1,90 @@
-import path from "path";
-import { randomUUID } from "crypto";
-import { Context } from "koishi";
-import { defineAccessor } from "@satorijs/core";
+import { Context } from 'koishi';
+import * as lancedb from 'lancedb';
+import { EmbeddingBase } from 'koishi-plugin-yesimbot';
 
-import { CacheManager } from "koishi-plugin-yesimbot";
-import { calculateCosineSimilarity } from "koishi-plugin-yesimbot";
-import { MemoryItem, MemoryType } from "./model";
+type StoreStatus = 'uninitialized' | 'ready' | 'failed';
 
-export interface MemoryMetadata {
-  content: string;
-  topic: string;
-  keywords: string[];
+export class LanceDBVectorStore {
+  private db: lancedb.Connection;
+  private table: lancedb.Table;
+  private embedder: EmbeddingBase;
+  private config: any;
+  private ctx: Context;
 
-  type: MemoryType;
-  createdAt: Date;
-  updatedAt: Date;
-}
+  private status: StoreStatus = 'uninitialized';
 
-export class MemoryVectorStore {
-  readonly store: CacheManager<MemoryItem>;
-
-  constructor(private ctx: Context) {
-    const vectorsFilePath = path.join(ctx.baseDir, "data/yesimbot/.vector_cache/memory.bin");
-    this.store = new CacheManager(vectorsFilePath, true);
+  constructor(ctx: Context, config: any, embedder: EmbeddingBase) {
+    this.ctx = ctx;
+    this.config = config;
+    this.embedder = embedder;
   }
 
-  delete(id: string): boolean {
-    return this.store.delete(id);
-  }
-
-  clear(): void {
-    this.store.clear();
-  }
-
-  get(id: string): MemoryItem | undefined {
-    return this.store.get(id);
-  }
-
-  getAll(): MemoryItem[] {
-    let vectors = this.store.values();
-    return Array.from(vectors);
-  }
-
-  find(filter: (metadata: MemoryMetadata) => boolean): MemoryItem {
-    return this.getAll().find(filter);
-  }
-
-  update(id: string, embedding: number[], metadata: MemoryMetadata): void {
-    if (!this.store.has(id)) return;
-
-    const oldVector = this.store.get(id);
-    if (!oldVector) return;
-
-    const updatedVector: MemoryItem = {
-      ...oldVector,
-      embedding,
-      magnitude: getMagnitude(embedding),
-      content: metadata.content,
-      topic: metadata.topic || oldVector.topic,
-      keywords: metadata.keywords || oldVector.keywords,
-      type: metadata.type || oldVector.type,
-      updatedAt: new Date(),
-    };
-
-    this.store.set(id, updatedVector);
-  }
-
-  /**
-   *
-   * @param embedding
-   * @param metadata
-   * @returns memoryId
-   */
-  async addVector(embedding: number[], metadata: MemoryMetadata): Promise<string> {
-    const id = randomUUID();
-    this.store.set(id, {
-      id,
-      embedding,
-      magnitude: getMagnitude(embedding),
-
-      ...metadata,
-    });
-    return id;
-  }
-
-  async addVectors(embeddings: number[][], metadatas: MemoryMetadata[]): Promise<void> {
-    embeddings.forEach((embedding, index) => {
-      const id = randomUUID();
-      this.store.set(id, {
-        id,
-        embedding,
-        magnitude: getMagnitude(embedding),
-
-        ...metadatas[index],
-      })
-    });
-  }
-
-  filter(filter: (metadata: MemoryMetadata) => boolean): MemoryItem[] {
-    return this.getAll().filter(filter);
-  }
-
-  /**
-   * Find k most similar vectors to the given query vector.
-   *
-   * This function returns the k most similar vectors to the given query vector,
-   * along with their similarity scores. The similarity is calculated using the
-   * cosine similarity metric.
-   *
-   * @param query The query vector to search for.
-   * @param k The number of most similar vectors to return.
-   * @param filter A filter function to apply to the vectors before returning them.
-   * @returns An array of [Vector, number] pairs, where the first element is the
-   *          vector and the second element is the similarity score. The array is
-   *          sorted in descending order of similarity score.
-   */
-  async similaritySearchVectorWithScore(query: number[], k: number, filter?: (metadata: MemoryMetadata) => boolean): Promise<[MemoryItem, number][]> {
-    const magnitude = getMagnitude(query);
-    let results: [MemoryItem, number][] = [];
-
-    for (const vector of this.store.values()) {
-      if (!vector.magnitude) vector.magnitude = getMagnitude(vector.embedding);
-      const similarity = calculateCosineSimilarity(query, vector.embedding, magnitude, vector.magnitude);
-      if (!filter || filter(vector)) {
-        results.push([vector, similarity]);
-      }
+  private async init(): Promise<void> {
+    if (this.status === 'ready') return;
+    if (this.status === 'failed') {
+      throw new Error('LanceDB is in a failed state. Aborting operation.');
     }
 
-    results.sort((a, b) => b[1] - a[1]);
-    return results.slice(0, k);
+    try {
+      this.db = await lancedb.connect(this.config.path);
+      const tableNames = await this.db.tableNames();
+
+      if (tableNames.includes(this.config.tableName)) {
+        this.table = await this.db.openTable(this.config.tableName);
+      } else {
+        const schema = new lancedb.Schema({
+            vector: new lancedb.vector(this.embedder.embedding_dims),
+            text_summary: 'string',
+            user_id: 'string',
+            timestamp: 'number',
+            original_text: 'string',
+        });
+        this.table = await this.db.createTable(this.config.tableName, schema);
+      }
+      this.status = 'ready';
+      this.ctx.logger.info('LanceDB vector store initialized successfully.');
+    } catch (e) {
+      this.status = 'failed';
+      this.ctx.logger.error(`LanceDB initialization failed critically. The memory system will be disabled. Error: ${e.message}`);
+      throw e;
+    }
   }
 
-  async similaritySearch(query: number[], k: number, filter?: (vector: MemoryItem) => boolean): Promise<MemoryItem[]> {
-    const results = await this.similaritySearchVectorWithScore(query, k, filter);
-    return results.map((result) => result[0]);
-  }
-}
+  async addMemory(summary: string, originalText: string, userId: string): Promise<void> {
+    if (this.status === 'failed') return;
 
-/**
- * 获取向量的模
- * @param vector
- * @returns
- */
-export function getMagnitude(vector: number[]): number {
-  return Math.sqrt(vector.reduce((sum, val) => sum + val * val, 0));
+    try {
+      await this.init();
+      const vector = await this.embedder.embed(summary);
+      await this.table.add([{
+        vector,
+        text_summary: summary,
+        user_id: userId,
+        timestamp: Date.now(),
+        original_text: originalText,
+      }]);
+    } catch (error) {
+      this.ctx.logger.warn(`Failed to add memory to LanceDB: ${error.message}`);
+    }
+  }
+
+  async search(queryText: string, userId: string, k: number): Promise<string[]> {
+    if (this.status === 'failed') return [];
+
+    try {
+      await this.init();
+      const queryVector = await this.embedder.embed(queryText);
+      
+      const results = await this.table
+        .search(queryVector)
+        .where(`user_id = '${userId}'`)
+        .limit(k)
+        .execute();
+        
+      return results.map(r => r.text_summary as string);
+    } catch (error) {
+      this.ctx.logger.warn(`Failed to search memory from LanceDB: ${error.message}`);
+      throw error;
+    }
+  }
 }

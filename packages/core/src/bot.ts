@@ -39,6 +39,8 @@ export class Bot {
     private sendAssistantMessageAs: "USER" | "ASSISTANT";
     private addRoleTagBeforeContent: boolean;
 
+    private intelligentRouterConfig: Config['IntelligentRouter'];
+
     private extensions: { [key: string]: Extension & Function } = {};
     private toolsSchema: ToolSchema[] = [];
 
@@ -60,6 +62,7 @@ export class Bot {
         this.minTriggerCount = Math.min(config.MemorySlot.MinTriggerCount, config.MemorySlot.MaxTriggerCount);
         this.maxTriggerCount = Math.max(config.MemorySlot.MinTriggerCount, config.MemorySlot.MaxTriggerCount);
         this.allowErrorFormat = config.Settings.AllowErrorFormat;
+        this.intelligentRouterConfig = config.IntelligentRouter;
         this.adapterSwitcher = new AdapterSwitcher(
             config.API.APIList,
             config.Parameters
@@ -127,40 +130,151 @@ export class Bot {
     }
 
     async generateResponse(messages: Message[], debug = false): Promise<LLMResponse> {
-        let { current, adapter } = this.getAdapter();
+        const lastUserMessageContent = messages
+            .filter(m => m.role === 'user')
+            .map(m => typeof m.content === 'string' ? m.content : (m.content as any[]).filter(c => c.type === 'text').map(c => c.text).join(''))
+            .pop() || '';
 
-        if (!adapter) throw new Error("没有可用的适配器");
+        const { Enabled, LatencyOptimization, StandardModel, EnhancedModel } = this.intelligentRouterConfig;
 
-        for (const message of messages) this.addContext(message);
+        if (!Enabled) {
+            return this._executeStandardRequest(messages, debug);
+        }
+
+        if (LatencyOptimization.Enabled) {
+            const heuristicDecision = this._applyHeuristics(lastUserMessageContent);
+            if (heuristicDecision === 'ENHANCED') {
+                this.ctx.logger.info(`路由决策：启发式规则命中 -> ENHANCED`);
+                return this._executeEnhancedRequest(messages, debug);
+            }
+            if (heuristicDecision === 'STANDARD') {
+                this.ctx.logger.info(`路由决策：启发式规则命中 -> STANDARD`);
+                return this._executeStandardRequest(messages, debug);
+            }
+        }
+
+        const routerPromise = this._determineModel(lastUserMessageContent);
+        const standardPayloadPromise = this._prepareRequestPayload(StandardModel.AdapterId, false, messages);
+
+        const routerResult: any = await Promise.race([
+            routerPromise,
+            new Promise(resolve => setTimeout(() => resolve({ timedOut: true }), LatencyOptimization.RouterTimeout))
+        ]);
+
+        if (!routerResult.timedOut && routerResult.isEnhanced) {
+            this.ctx.logger.info(`路由决策：并行处理后选择 -> ENHANCED`);
+            return this._executeEnhancedRequest(messages, debug);
+        }
+        
+        this.ctx.logger.info(`路由决策：并行处理后选择 -> STANDARD (或超时回退)`);
+        const standardPayload = await standardPayloadPromise;
+        return this._executeFinalRequest(StandardModel.AdapterId, standardPayload, debug);
+    }
+
+    private _applyHeuristics(message: string): 'STANDARD' | 'ENHANCED' | null {
+        const { ShortMessageThreshold, CodeBlockTriggersEnhanced } = this.intelligentRouterConfig.LatencyOptimization.Heuristics;
+        
+        if (CodeBlockTriggersEnhanced && message.includes('```')) {
+            return 'ENHANCED';
+        }
+        if (ShortMessageThreshold > 0 && message.split(' ').length <= ShortMessageThreshold) {
+            return 'STANDARD';
+        }
+        return null;
+    }
+
+    private async _determineModel(lastUserMessage: string): Promise<{ adapterId: string; isEnhanced: boolean }> {
+        const { RouterModel, StandardModel, EnhancedModel } = this.intelligentRouterConfig;
+    
+        try {
+            const { adapter: routerAdapter } = this.adapterSwitcher.getAdapterById(RouterModel.AdapterId);
+            if (!routerAdapter) {
+                throw new Error(`Router adapter with ID '${RouterModel.AdapterId}' not found.`);
+            }
+    
+            const routerPrompt = new Template(RouterModel.RouterPrompt).render({ lastUserMessage });
+    
+            const response = await routerAdapter.chat([SystemMessage(routerPrompt)], [], true);
+            const decision = response.message.content.trim().toUpperCase();
+    
+            this.ctx.logger.info(`路由模型决策: ${decision}`);
+    
+            if (decision === 'ENHANCED') {
+                return { adapterId: EnhancedModel.AdapterId, isEnhanced: true };
+            }
+        } catch (error) {
+            this.ctx.logger.error(`路由模型调用失败: ${error.message}。将回退到标准模型。`);
+        }
+    
+        return { adapterId: StandardModel.AdapterId, isEnhanced: false };
+    }
+
+    private async _prepareRequestPayload(adapterId: string, isEnhanced: boolean, messages: Message[]): Promise<{ systemPrompt: string, context: Message[], adapterIndex: number }> {
+        const { adapter, current } = this.adapterSwitcher.getAdapterById(adapterId);
+        if (!adapter) throw new Error(`Adapter with ID ${adapterId} not found`);
+
+        const lastUserMessageContent = messages
+            .filter(m => m.role === 'user')
+            .map(m => typeof m.content === 'string' ? m.content : '')
+            .pop() || '';
+        
+        const retrievedMemories = await this.ctx.memory.retrieve(this.session.userId, lastUserMessageContent);
+
+        let longTermMemoryPrompt = '';
+        if (retrievedMemories.length > 0) {
+            longTermMemoryPrompt = `[相关长期记忆]\n${retrievedMemories.join('\n')}\n\n`;
+        }
+
+        let baseSystemPrompt = longTermMemoryPrompt + this.prompt;
+        let finalSystemPrompt = baseSystemPrompt;
+
+        if (isEnhanced) {
+            finalSystemPrompt += `\n\n${this.intelligentRouterConfig.EnhancedModel.EnhancedPrompt}`;
+        }
+
+        const tempContext = [...this.context];
+        for (const message of messages) {
+            while (tempContext.length >= this.contextSize) {
+                tempContext.shift();
+            }
+            tempContext.push(message);
+        }
+
+        return { systemPrompt: finalSystemPrompt, context: tempContext, adapterIndex: current };
+    }
+
+    private async _executeFinalRequest(adapterId: string, payload: { systemPrompt: string, context: Message[], adapterIndex: number }, debug: boolean): Promise<LLMResponse> {
+        const { adapter } = this.adapterSwitcher.getAdapterById(adapterId);
+        if (!adapter) throw new Error(`Adapter ${adapterId} not found`);
+
+        for (const message of payload.context.slice(this.context.length)) {
+            this.addContext(message);
+        }
 
         if (!adapter.ability.includes("原生工具调用")) {
-            // appendFunctionPrompt
             let str = Object.values(this.extensions)
                 .map((extension) => getFunctionPrompt(extension))
                 .join("\n");
-            this.prompt = this.prompt.replace("{{functionPrompt}}", getFunctionSchema(this.finalFormat) + `${isEmpty(str) ? "No functions available." : str}`);
+            payload.systemPrompt = payload.systemPrompt.replace("{{functionPrompt}}", getFunctionSchema(this.finalFormat) + `${isEmpty(str) ? "No functions available." : str}`);
         }
 
-        const response = await adapter.chat([SystemMessage(this.prompt), ...(this.sendResolveOK ? [AssistantMessage("Resolve OK")] : []), ...this.context], adapter.ability.includes("原生工具调用") ? this.toolsSchema : undefined, debug);
+        const response = await adapter.chat([SystemMessage(payload.systemPrompt), ...(this.sendResolveOK ? [AssistantMessage("Resolve OK")] : []), ...payload.context], adapter.ability.includes("原生工具调用") ? this.toolsSchema : undefined, debug);
         let content = response.message.content;
+
         if (adapter.ability.includes("深度思考")) {
-            // 移除adapter.reasoningStart和adapter.reasoningEnd之间的内容
-            // adapter.reasoningStart和adapter.reasoningEnd本身也可能是正则表达式，例如adapter.reasoningEnd可能是Reasoned for (?:a second|[^\n]* seconds)
             const contentWithoutReasoning = content.replace(
                 new RegExp(`${adapter.reasoningStart}[\\s\\S]*?${adapter.reasoningEnd}`, 'g'),
                 ''
             );
-
             content = contentWithoutReasoning.trim();
         }
-        if (debug) this.ctx.logger.info(`Adapter: ${current}, Response: \n${content}`);
+        if (debug) this.ctx.logger.info(`Adapter: ${adapterId}, Response: \n${content}`);
 
         if (adapter.ability.includes("原生工具调用")) {
             const toolResponse = await this.handleToolCalls(response.message.tool_calls || [], debug);
             if (toolResponse) return toolResponse;
         }
 
-        // handle response
         let LLMResponse: any = {};
         const regex = new RegExp(`\\\`\\\`\\\`(json|xml)\\s*\\n([\\s\\S]*?)\\n\\\`\\\`\\\`|({[\\s\\S]*?}|<[\\s\\S]*?>[\\s\\S]*<\\/[\\s\\S]*?>)`,'gis');
         let contentToParse = null;
@@ -171,20 +285,18 @@ export class Bot {
             const codeContent = match[2];
             const directContent = match[3];
 
-            // 优先匹配与配置格式一致的代码块
             if (lang && lang.toUpperCase() === this.finalFormat) {
                 contentToParse = codeContent;
-                break; // 找到匹配的代码块，停止搜索
+                break;
             }
 
-            // 检查直接内容是否符合当前格式
             if (directContent) {
                 if (
                     (this.finalFormat === 'JSON' && directContent.trim().startsWith('{')) ||
                     (this.finalFormat === 'XML' && directContent.trim().startsWith('<'))
                 ) {
                     contentToParse = directContent;
-                    break; // 找到匹配的直接内容，停止搜索
+                    break;
                 }
             }
         }
@@ -194,53 +306,28 @@ export class Bot {
                 if (this.finalFormat === "JSON") {
                     LLMResponse = JSON.parse(jsonrepair(contentToParse));
                 } else if (this.finalFormat === "XML") {
-                    const parser = new XMLParser({
-                      ignoreAttributes: false,
-                      processEntities: false,
-                      stopNodes: ['*.logic', '*.reply', '*.check', '*.finalReply'],
-                    });
+                    const parser = new XMLParser({ ignoreAttributes: false, processEntities: false, stopNodes: ['*.logic', '*.reply', '*.check', '*.finalReply'] });
                     LLMResponse = parser.parse(contentToParse);
                 }
                 this.addContext(AssistantMessage(JSON.stringify(LLMResponse)));
             } catch (e) {
-                const reason = `${this.finalFormat} 解析失败。请上报此消息给开发者: ${e.message}`;
-                return {
-                    status: "fail",
-                    raw: content,
-                    usage: response.usage,
-                    reason,
-                    adapterIndex: current,
-                };
+                return { status: "fail", raw: content, usage: response.usage, reason: `${this.finalFormat} 解析失败。请上报此消息给开发者: ${e.message}`, adapterIndex: payload.adapterIndex };
             }
         } else {
-            // 未找到匹配内容，尝试直接解析或修复
             try {
                 if (this.finalFormat === "JSON") {
-                    const repaired = jsonrepair(content);
-                    LLMResponse = JSON.parse(repaired);
+                    LLMResponse = JSON.parse(jsonrepair(content));
                 } else {
-                    const parser = new XMLParser({
-                      ignoreAttributes: false,
-                      processEntities: false,
-                      stopNodes: ['*.logic', '*.reply', '*.check', '*.finalReply'],
-                    });
+                    const parser = new XMLParser({ ignoreAttributes: false, processEntities: false, stopNodes: ['*.logic', '*.reply', '*.check', '*.finalReply'] });
                     LLMResponse = parser.parse(content);
                 }
                 this.addContext(AssistantMessage(JSON.stringify(LLMResponse)));
             } catch (err) {
-                const reason = `没有找到有效的 ${this.finalFormat} 结构: ${content}`;
-                return {
-                    status: "fail",
-                    raw: content,
-                    usage: response.usage,
-                    reason,
-                    adapterIndex: current,
-                };
+                return { status: "fail", raw: content, usage: response.usage, reason: `没有找到有效的 ${this.finalFormat} 结构: ${content}`, adapterIndex: payload.adapterIndex };
             }
         }
 
-        let nextTriggerCount: number = Random.int(this.minTriggerCount, this.maxTriggerCount + 1); // 双闭区间
-        // 规范化 nextTriggerCount，确保在设置的范围内
+        let nextTriggerCount: number = Random.int(this.minTriggerCount, this.maxTriggerCount + 1);
         const nextTriggerCountbyLLM = Math.max(this.minTriggerCount, Math.min(Number(LLMResponse.nextReplyIn) ?? this.minTriggerCount, this.maxTriggerCount));
         nextTriggerCount = Number(nextTriggerCountbyLLM) || nextTriggerCount;
         const finalLogic = LLMResponse.logic || "";
@@ -257,66 +344,36 @@ export class Bot {
         }
 
         if (LLMResponse.status === "success") {
-            let finalResponse: string = "";
-            let unsafeResponse: any = LLMResponse.finalReply || LLMResponse.reply || "";
-
-            finalResponse = unsafeResponse.toString();
-
+            let finalResponse: string = (LLMResponse.finalReply || LLMResponse.reply || "").toString();
             if (this.allowErrorFormat) {
-                // 兼容弱智模型的错误回复
                 finalResponse += LLMResponse.msg || LLMResponse.text || LLMResponse.message || LLMResponse.answer || "";
             }
 
             if (isEmpty(finalResponse)) {
-                const reason = `回复内容为空`;
-                this.ctx.logger.info(reason);
-                return {
-                    status: "skip",
-                    raw: content,
-                    usage: response.usage,
-                    nextTriggerCount,
-                    functions,
-                    logic: finalLogic,
-                    adapterIndex: current,
-                };
+                return { status: "skip", raw: content, usage: response.usage, nextTriggerCount, functions, logic: finalLogic, adapterIndex: payload.adapterIndex };
             }
 
             const replyTo = this.extractReplyTo(LLMResponse.replyTo);
             finalResponse = await this.unparseFaceMessage(finalResponse);
 
-            return {
-                status: "success",
-                raw: content,
-                finalReply: finalResponse,
-                replyTo,
-                nextTriggerCount,
-                logic: finalLogic,
-                functions,
-                usage: response.usage,
-                adapterIndex: current,
-            };
+            return { status: "success", raw: content, finalReply: finalResponse, replyTo, nextTriggerCount, logic: finalLogic, functions, usage: response.usage, adapterIndex: payload.adapterIndex };
         } else if (LLMResponse.status === "skip") {
-            return {
-                status: "skip",
-                raw: content,
-                nextTriggerCount,
-                logic: finalLogic,
-                usage: response.usage,
-                functions,
-                adapterIndex: current,
-            };
+            return { status: "skip", raw: content, nextTriggerCount, logic: finalLogic, usage: response.usage, functions, adapterIndex: payload.adapterIndex };
         } else if (LLMResponse.status === "interaction") {
             return this.handleFunctionCalls(functions, debug);
         } else {
-            const reason = `status 不是一个有效值: ${LLMResponse.status}`;
-            return {
-                status: "fail",
-                raw: content,
-                usage: response.usage,
-                reason,
-                adapterIndex: current,
-            };
+            return { status: "fail", raw: content, usage: response.usage, reason: `status 不是一个有效值: ${LLMResponse.status}`, adapterIndex: payload.adapterIndex };
         }
+    }
+
+    private async _executeStandardRequest(messages: Message[], debug: boolean): Promise<LLMResponse> {
+        const payload = await this._prepareRequestPayload(this.intelligentRouterConfig.StandardModel.AdapterId, false, messages);
+        return this._executeFinalRequest(this.intelligentRouterConfig.StandardModel.AdapterId, payload, debug);
+    }
+
+    private async _executeEnhancedRequest(messages: Message[], debug: boolean): Promise<LLMResponse> {
+        const payload = await this._prepareRequestPayload(this.intelligentRouterConfig.EnhancedModel.AdapterId, true, messages);
+        return this._executeFinalRequest(this.intelligentRouterConfig.EnhancedModel.AdapterId, payload, debug);
     }
 
     // 或许可以将这两个函数整合到一起

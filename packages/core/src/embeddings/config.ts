@@ -2,7 +2,7 @@ import { Schema } from "koishi";
 
 export interface EnabledEmbeddingConfig {
   Enabled: true;
-  APIType: "OpenAI" | "Custom" | "Ollama";
+  APIType: "OpenAI" | "Custom" | "Ollama" | "Gemini";
   BaseURL: string;
   APIKey: string;
   EmbeddingModel: string;
@@ -27,7 +27,7 @@ export const EmbeddingConfig: Schema<EmbeddingConfig> = Schema.intersect([
     Schema.intersect([
       Schema.object({
         Enabled: Schema.const(true).required(),
-        APIType: Schema.union(["OpenAI", "Ollama", "Custom"])
+        APIType: Schema.union(["OpenAI", "Ollama", "Custom", "Gemini"])
           .default("OpenAI")
           .description("Embedding API 类型"),
         APIKey: Schema.string().description("API 令牌"),
@@ -55,6 +55,12 @@ export const EmbeddingConfig: Schema<EmbeddingConfig> = Schema.intersect([
           APIType: Schema.const("Ollama"),
           BaseURL: Schema.string()
             .default("http://127.0.0.1:11434")
+            .description("Embedding API 基础 URL"),
+        }),
+        Schema.object({
+          APIType: Schema.const("Gemini"),
+          BaseURL: Schema.string()
+            .default("https://generativelanguage.googleapis.com/v1beta/models/embedding-001:embedContent")
             .description("Embedding API 基础 URL"),
         }),
         Schema.object({

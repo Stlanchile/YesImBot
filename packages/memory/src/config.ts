@@ -1,59 +1,54 @@
 import { Schema } from "koishi";
+import { EmbeddingConfig as CoreEmbeddingConfig } from "koishi-plugin-yesimbot";
 
-export interface EmbeddingConfig {
-  APIType: "OpenAI" | "Custom" | "Ollama";
-  BaseURL: string;
-  APIKey: string;
-  EmbeddingModel: string;
-  EmbeddingDims: number;
-  ChunkSize: number;
-  RequestBody?: string;
-  GetVecRegex?: string;
+export const EmbeddingConfig = CoreEmbeddingConfig;
+
+export interface ModelConfig {
+  endpoint: string;
+  apiKey: string;
+  model: string;
+  prompt: string;
+  generationConfig?: any;
 }
 
-export const EmbeddingConfig: Schema<EmbeddingConfig> = Schema.intersect([
-  Schema.object({
-    APIType: Schema.union(["OpenAI", "Ollama", "Custom"])
-      .default("OpenAI")
-      .description("Embedding API 类型"),
-    APIKey: Schema.string().description("API 令牌"),
-    EmbeddingModel: Schema.string()
-      .default("text-embedding-3-large")
-      .description("Embedding 模型 ID"),
-    EmbeddingDims: Schema.number()
-      .default(1536)
-      .experimental()
-      .description("Embedding 向量维度"),
-    ChunkSize: Schema.number()
-      .default(300)
-      .experimental()
-      .description("文本分词长度"),
-  }).description("Embedding API 配置"),
-  Schema.union([
-    Schema.object({
-      APIType: Schema.const("OpenAI"),
-      BaseURL: Schema.string()
-        .default("https://api.openai.com")
-        .description("Embedding API 基础 URL"),
-    }),
-    Schema.object({
-      APIType: Schema.const("Ollama"),
-      BaseURL: Schema.string()
-        .default("http://127.0.0.1:11434")
-        .description("Embedding API 基础 URL"),
-    }),
-    Schema.object({
-      APIType: Schema.const("Custom"),
-      BaseURL: Schema.string().required(),
-      RequestBody: Schema.string().description(
-        "自定义请求体。<br/>其中：<br/>\
-            `<text>`（包含尖括号）会被替换成用于计算嵌入向量的文本；<br/>\
-            `<apikey>`（包含尖括号）会被替换成此页面设置的 API 密钥；<br/>\
-            `<model>`（包含尖括号）会被替换成此页面设置的模型名称".trim()
-      ),
-      GetVecRegex: Schema.string().description(
-        "从自定义Embedding服务提取嵌入向量的正则表达式。注意转义"
-      )
-    }),
-  ])
-])
+export const ModelConfig: Schema<ModelConfig> = Schema.object({
+  endpoint: Schema.string().description("API Endpoint"),
+  apiKey: Schema.string().role('secret').description("API 密钥"),
+  model: Schema.string().description("模型名称"),
+  prompt: Schema.string().role('textarea').description("系统提示词"),
+  generationConfig: Schema.any().description("额外的生成配置 (例如，用于强制JSON输出)"),
+});
+
+export interface VectorStoreConfig {
+  path: string;
+  tableName: string;
+}
+
+export const VectorStoreConfig: Schema<VectorStoreConfig> = Schema.object({
+  path: Schema.string().default('./data/lancedb').description("LanceDB 数据库文件路径"),
+  tableName: Schema.string().default('memories').description("表名"),
+});
+
+export interface RetrievalConfig {
+  topK: number;
+}
+
+export const RetrievalConfig: Schema<RetrievalConfig> = Schema.object({
+  topK: Schema.number().default(3).description("每次检索返回最相关的记忆条数"),
+});
+
+export interface Config {
+  embedding: CoreEmbeddingConfig;
+  decisionModel: ModelConfig;
+  summarizerModel: ModelConfig;
+  vectorStore: VectorStoreConfig;
+  retrieval: RetrievalConfig;
+}
+
+export const Config: Schema<Config> = Schema.object({
+  embedding: EmbeddingConfig.description("文本嵌入配置"),
+  decisionModel: ModelConfig.description("决策模型配置"),
+  summarizerModel: ModelConfig.description("摘要模型配置"),
+  vectorStore: VectorStoreConfig.description("向量数据库配置"),
+  retrieval: RetrievalConfig.description("记忆检索配置"),
+});

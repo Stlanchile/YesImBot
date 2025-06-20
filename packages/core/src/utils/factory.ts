@@ -2,7 +2,7 @@ import { CloudflareAdapter, CustomAdapter, GeminiAdapter, OllamaAdapter, OpenAIA
 import { BaseAdapter } from "../adapters/base";
 import { LLM } from "../adapters/config";
 import { Config } from "../config";
-import { CustomEmbedding, OllamaEmbedding, OpenAIEmbedding } from "../embeddings";
+import { CustomEmbedding, GeminiEmbedding, OllamaEmbedding, OpenAIEmbedding } from "../embeddings";
 import { EmbeddingBase } from "../embeddings/base";
 import { EnabledEmbeddingConfig } from "../embeddings/config";
 import { CacheManager } from "../managers/cacheManager";
@@ -23,16 +23,19 @@ export function getAdapter(config: LLM, parameters?: Config["Parameters"]): Base
     throw new Error(`不支持的 API 类型: ${config.APIType}`);
 }
 
-export function getEmbedding(config: EnabledEmbeddingConfig, manager?: CacheManager<number[]>) {
+import { Context } from "koishi";
+
+export function getEmbedding(ctx: Context, config: EnabledEmbeddingConfig, manager?: CacheManager<number[]>) {
     // 将 APIType 映射到对应的 Embedding 类
-    const embeddingMap: { [key: string]: new (config: EnabledEmbeddingConfig, manager?: CacheManager<number[]>) => EmbeddingBase } = {
+    const embeddingMap: { [key: string]: new (ctx: Context, config: EnabledEmbeddingConfig, manager?: CacheManager<number[]>) => EmbeddingBase } = {
         "OpenAI": OpenAIEmbedding,
         "Ollama": OllamaEmbedding,
         "Custom": CustomEmbedding,
+        "Gemini": GeminiEmbedding,
     };
     const EmbeddingClass = embeddingMap[config.APIType];
     if (EmbeddingClass) {
-        return new EmbeddingClass(config, manager);
+        return new EmbeddingClass(ctx, config, manager);
     }
     throw new Error(`不支持的 Embedding 类型: ${config.APIType}`);
 }
