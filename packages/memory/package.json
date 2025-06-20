@@ -1,6 +1,6 @@
 {
-    "name": "koishi-plugin-yesimbot-memory",
-    "description": "YesImBot 记忆模块",
+    "name": "koishi-plugin-aris-memory",
+    "description": "aris 记忆模块",
     "version": "0.0.1",
     "main": "lib/index.js",
     "typings": "lib/index.d.ts",
@@ -10,13 +10,13 @@
     },
     "dependencies": {
         "axios": "^1.7.2",
-        "lancedb": "^0.5.0",
+        "lancedb": "^0.21.0",
         "zod": "^3.23.8"
     },
     "koishi": {
         "description": {
-            "zh": "YesImBot 记忆模块",
-            "en": "Memory module for YesImBot"
+            "zh": "aris 记忆模块",
+            "en": "Memory module for aris"
         },
         "service": {
             "required": [
